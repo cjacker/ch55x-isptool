@@ -14,7 +14,7 @@ public:
     uint32_t Read(char *pszInput);
     uint32_t Write(char *pszOutput);
     uint32_t InitBuffer();
-    uint32_t FreeBuffer();
+    void FreeBuffer();
     uint32_t u32Size;
 protected:
 };

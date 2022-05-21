@@ -46,7 +46,7 @@ uint32_t KT_BinIO::InitBuffer()
     memset(pWriteBuff, 0xFF, u32Size);
     return 1;
 }
-uint32_t KT_BinIO::FreeBuffer()
+void KT_BinIO::FreeBuffer()
 {
     free(pReadBuff);
     free(pWriteBuff);

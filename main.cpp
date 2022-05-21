@@ -3,7 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <libusb-1.0/libusb.h>
+
 #include "KT_BinIO.h"
+#include "KT_ProgressBar.h"
+
+/* WCH ch55x vid and pid */
+#define CH55X_VID 0x4348
+#define CH55X_PID 0x55e0 
 
 KT_BinIO ktFlash;
 
@@ -75,25 +81,21 @@ uint8_t u8ReadCmd[64] = {
 };
 uint8_t u8ReadRespond = 6;
 
-libusb_device_handle *h;
 
-uint32_t Write(uint8_t *p8Buff, uint8_t u8Length);
-uint32_t Read(uint8_t *p8Buff, uint8_t u8Length);
-
-uint32_t Write(uint8_t *p8Buff, uint8_t u8Length)
+uint32_t Write(libusb_device_handle *handle, uint8_t *p8Buff, uint8_t u8Length)
 {
 	int len;
-	if (libusb_bulk_transfer(h, 0x02, (unsigned char*)p8Buff, u8Length, &len, 5000) != 0) {
+	if (libusb_bulk_transfer(handle, 0x02, (unsigned char*)p8Buff, u8Length, &len, 5000) != 0) {
 		return 0;
 	} else {
 		return 1;
 	}
 	return 0;
 }
-uint32_t Read(uint8_t *p8Buff, uint8_t u8Length)
+uint32_t Read(libusb_device_handle *handle, uint8_t *p8Buff, uint8_t u8Length)
 {
 	int len;
-	if (libusb_bulk_transfer(h, 0x82, (unsigned char*)p8Buff, u8Length, &len, 5000) != 0) {
+	if (libusb_bulk_transfer(handle, 0x82, (unsigned char*)p8Buff, u8Length, &len, 5000) != 0) {
 		return 0;
 	} else {
 		return 1;
@@ -106,11 +108,20 @@ int main(int argc, char const *argv[])
 	uint32_t i;
 	int rc;
 	KT_BinIO ktBin;
+  KT_ProgressBar ktProg;
 
-	printf("CH55x Programmer\n");
+  libusb_context *context = NULL;
+  libusb_device **deviceList = NULL;
+  libusb_device_handle *handle = NULL;
+
+  int deviceCount;
+  bool foundDevice = false;
+
+	printf("WCH ch55x programmer\n");
+
 	if (argc != 2) {
-		printf("usage: ch552isptool flash_file.bin\n");
-        return 1;
+		printf("usage: ch55xisptool flash_file.bin\n");
+    return 1;
 	}
     /* load flash file */
 	ktBin.u32Size = 10 * 1024;
@@ -120,69 +131,107 @@ int main(int argc, char const *argv[])
 		return 0;
 	}
 
-	rc = libusb_init(NULL);
+	rc = libusb_init(&context);
 	if(rc < 0) {
 		fprintf(stderr, "Cannot initialize libusb: %s\n", libusb_error_name(rc));
 		return 1;
 	};
 
-	libusb_set_debug(NULL, 3);
-	
-	h = libusb_open_device_with_vid_pid(NULL, 0x4348, 0x55e0);
+	// libusb_set_debug(context, 3);
 
-	if (h == NULL) {
-		fprintf(stderr, "Not found: CH552 Chip in Bootloader Mode\n");
+  deviceCount = libusb_get_device_list(context, &deviceList); 
+
+  if(deviceCount <= 0) {
+    fprintf(stderr, "No USB device found\n");
+    return 1;
+  }
+
+  for(size_t idx = 0; idx < deviceCount; ++idx) {
+     libusb_device *device = deviceList[idx];
+     libusb_device_descriptor desc = {0};
+     rc = libusb_get_device_descriptor(device, &desc);
+     if(rc < 0) {
+       fprintf(stderr, "Error happened when list usb device\n");
+       return 1;
+     }
+     if(desc.idVendor == CH55X_VID && desc.idProduct == CH55X_PID) {
+       foundDevice = true; 
+     }
+  }
+
+  libusb_free_device_list(deviceList, deviceCount);
+
+  if(foundDevice) {
+    printf("Found WinChipHead ch55x device.\n");
+  } else {
+    printf("Not found WinChipHead ch55x device: please make sure it's in ISP mode and plugged in.\n");
+    exit(1);
+  }
+ 
+	handle = libusb_open_device_with_vid_pid(context, CH55X_VID, CH55X_PID);
+
+	if (handle == NULL) {
+		fprintf(stderr, "No permission to open device, try 'sudo'\n");
 		return 1;
 	}
 	
-	libusb_claim_interface(h, 0);
+	libusb_claim_interface(handle, 0);
 	
 	/* Detect MCU */
-	if (!Write(u8DetectCmd, u8DetectCmd[1] + 3)) {
+	if (!Write(handle, u8DetectCmd, u8DetectCmd[1] + 3)) {
 		fprintf(stderr, "Send Detect: Fail\n");
 		return 1;
 	}
 
-	if (!Read(u8Buff, u8DetectRespond)) {
+	if (!Read(handle, u8Buff, u8DetectRespond)) {
 		fprintf(stderr, "Read Detect: Fail\n");
 		return 1;
 	}
 
-    uint8_t chipID = u8Buff[4];
-	/* Check MCU ID */
-    switch (chipID) {
-        case 0x51:
-        case 0x52:
-            break;
-        default:
-		    fprintf(stderr, "Not supported chip: %02X, %02x\n", chipID, u8Buff[5]);
-		    return 1;
-    }
+  uint8_t chipID = u8Buff[4];
+
+  /* Check MCU series/family? ID */
 	if (u8Buff[5] != 0x11) {
 		fprintf(stderr, "Not supported chip: %02X, %02x\n", chipID, u8Buff[5]);
 		return 1;
 	}
+
+	/* Check MCU ID */
+  switch (chipID) {
+    case 0x51:
+    case 0x52:
+    case 0x54:
+    case 0x58:
+    case 0x59:
+      break;
+    default:
+	    fprintf(stderr, "Not supported chip: %02X, %02x\n", chipID, u8Buff[5]);
+	    return 1;
+  }
+
+  printf("Device model: CH5%x\n", chipID);
 	
 	/* Bootloader and Chip ID */
-	if (!Write(u8IdCmd, u8IdCmd[1] + 3)) {
+	if (!Write(handle, u8IdCmd, u8IdCmd[1] + 3)) {
 		fprintf(stderr, "Send ID: Fail\n");
 		return 1;
 	}
 	
-	if (!Read(u8Buff, u8IdRespond)) {
+	if (!Read(handle, u8Buff, u8IdRespond)) {
 		fprintf(stderr, "Read ID: Fail\n");
 		return 1;
 	}
 	
 	printf("Bootloader: %d.%d.%d\n", u8Buff[19], u8Buff[20], u8Buff[21]);
 	printf("ID: %02X %02X %02X %02X\n", u8Buff[22], u8Buff[23], u8Buff[24], u8Buff[25]);
+
 	/* check bootloader version */
-	if ((u8Buff[19] != 0x02) || (u8Buff[20] < 0x03) ||
-        ((u8Buff[20] == 0x03) && (u8Buff[21] != 0x01)) ||
-        ((u8Buff[20] == 0x04) && (u8Buff[21] != 0x00))) {
-		printf("Not support\n");
+  /* version 2.3.0/2.3.1/2.4.0 known works, here assume version >= 2.3 works*/
+	if (u8Buff[19] != 0x02 || u8Buff[20] < 0x03) {
+		printf("Bootloader version %d.%d.%d not supported.\n");
 		return 1;
 	}
+
 	/* Calc XOR Mask */
 
 	uint8_t u8Sum;
@@ -199,54 +248,60 @@ int main(int argc, char const *argv[])
 	printf("\n");
 
 	/* init or erase ??? */
-	if (!Write(u8InitCmd, u8InitCmd[1] + 3)) {
+	if (!Write(handle, u8InitCmd, u8InitCmd[1] + 3)) {
 		printf("Send Init: Fail\n");
 		return 1;
 	}
 	
-	if (!Read(u8Buff, u8InitRespond)) {
+	if (!Read(handle, u8Buff, u8InitRespond)) {
 		printf("Read Init: Fail\n");
 		return 1;
 	}
 
 	/* Bootloader and Chip ID */
-	if (!Write(u8IdCmd, u8IdCmd[1] + 3)) {
+	if (!Write(handle, u8IdCmd, u8IdCmd[1] + 3)) {
 		printf("Send ID: Fail\n");
 		return 1;
 	}
 	
-	if (!Read(u8Buff, u8IdRespond)) {
+	if (!Read(handle, u8Buff, u8IdRespond)) {
 		printf("Read ID: Fail\n");
 		return 1;
 	}
 
 	/* Set Flash Address to 0 */
-	if (!Write(u8AddessCmd, u8AddessCmd[1] + 3)) {
+	if (!Write(handle, u8AddessCmd, u8AddessCmd[1] + 3)) {
 		printf("Send Address: Fail\n");
 		return 1;
 	}
 	
-	if (!Read(u8Buff, u8AddessRespond)) {
+	if (!Read(handle, u8Buff, u8AddessRespond)) {
 		printf("Read Address: Fail\n");
 		return 1;
 	}
 
 	/* Erase or unknow */
-	if (!Write(u8EraseCmd, u8EraseCmd[1] + 3)) {
+	if (!Write(handle, u8EraseCmd, u8EraseCmd[1] + 3)) {
 		printf("Send Erase: Fail\n");
 		return 1;
 	}
 	
-	if (!Read(u8Buff, u8EraseRespond)) {
+	if (!Read(handle, u8Buff, u8EraseRespond)) {
 		printf("Read Erase: Fail\n");
 		return 1;
 	}
 	
-	/* Write */
-	printf("Write\n");
 	/* Progress */
 	uint32_t n;
 	n = 10 * 1024 / 56;
+  ktProg.SetMax(n);
+  ktProg.SetNum(50);
+  ktProg.SetPos(0);
+  ktProg.Display();
+
+	/* Write */
+	printf("Write: ");
+
 
 	for (i = 0; i < n; ++i) {
 		uint16_t u16Tmp;
@@ -262,12 +317,12 @@ int main(int argc, char const *argv[])
 		u16Tmp = i * 0x38;
 		u8WriteCmd[3] = (uint8_t)u16Tmp;
 		u8WriteCmd[4] = (uint8_t)(u16Tmp >> 8);
-		if (!Write(u8WriteCmd, u8WriteCmd[1] + 3)) {
+		if (!Write(handle, u8WriteCmd, u8WriteCmd[1] + 3)) {
 			printf("Send Write: Fail\n");
 			return 1;
 		}
 		
-		if (!Read(u8Buff, u8WriteRespond)) {
+		if (!Read(handle, u8Buff, u8WriteRespond)) {
 			printf("Read Write: Fail\n");
 			return 1;
 		}
@@ -275,10 +330,17 @@ int main(int argc, char const *argv[])
 			printf("Failed to write\n");
 			return 1;
 		}
+    ktProg.SetPos(i + 1);
+    ktProg.Display();
 	}
 
 	/* Verify */
-	printf("Verify\n");
+	printf("\nVerify");
+  ktProg.SetMax(n);
+  ktProg.SetNum(50);
+  ktProg.SetPos(0);
+  ktProg.Display();
+
 	for (i = 0; i < n; ++i) {
 		uint16_t u16Tmp;
 		uint32_t j;
@@ -293,12 +355,12 @@ int main(int argc, char const *argv[])
 		u16Tmp = i * 0x38;
 		u8VerifyCmd[3] = (uint8_t)u16Tmp;
 		u8VerifyCmd[4] = (uint8_t)(u16Tmp >> 8);
-		if (!Write(u8VerifyCmd, u8VerifyCmd[1] + 3)) {
+		if (!Write(handle, u8VerifyCmd, u8VerifyCmd[1] + 3)) {
 			printf("Send Verify: Fail\n");
 			return 1;
 		}
 		
-		if (!Read(u8Buff, u8VerifyRespond)) {
+		if (!Read(handle, u8Buff, u8VerifyRespond)) {
 			printf("Send Verify: Fail\n");
 			return 1;
 		}
@@ -306,13 +368,13 @@ int main(int argc, char const *argv[])
 			printf("Failed to verify\n");
 			return 1;
 		}
+    ktProg.SetPos(i + 1);
+    ktProg.Display();
 	}
 
 	/* Reset and Run */
-	Write(u8ResetCmd, u8ResetCmd[1] + 3);
-	printf("\n");
-	printf("Write complete!!!\n");
-	printf("------------------------------------------------------------------\n");
+	Write(handle, u8ResetCmd, u8ResetCmd[1] + 3);
+	printf("\nWrite complete!!!\n");
 
 	return 0;
 }
